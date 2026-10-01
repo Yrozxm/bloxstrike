@@ -25,6 +25,16 @@ if oldGui then
 	oldGui:Destroy()
 end
 
+local oldBhopGui = targetGuiParent:FindFirstChild("BloxStrikeBhopGui")
+if oldBhopGui then
+	oldBhopGui:Destroy()
+end
+
+local oldEspGui = CoreGui:FindFirstChild("BloxStrikeMenu")
+if oldEspGui then
+	oldEspGui:Destroy()
+end
+
 local WeaponComponent = nil
 pcall(function()
 	WeaponComponent = require(ReplicatedStorage.Classes.WeaponComponent)
@@ -55,6 +65,329 @@ pcall(function()
 	InventoryController = require(ReplicatedStorage.Controllers.InventoryController)
 end)
 
+local CharacterClass = nil
+pcall(function()
+	CharacterClass = require(ReplicatedStorage.Classes.Character)
+end)
+
+local Buttons = nil
+pcall(function()
+	Buttons = require(ReplicatedStorage.MovementV2.Buttons)
+end)
+
+-- Bhop Logic
+local bhopEnabled = false
+local spaceHeld = false
+
+local function setupBhop()
+	UserInputService.InputBegan:Connect(function(input, gpe)
+		if gpe then return end
+		if input.KeyCode == Enum.KeyCode.Space then
+			spaceHeld = true
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.KeyCode == Enum.KeyCode.Space then
+			spaceHeld = false
+		end
+	end)
+
+	if CharacterClass and Buttons then
+		if not _G.__originalSampleInput then
+			_G.__originalSampleInput = CharacterClass.SampleInput
+		end
+
+		local original = _G.__originalSampleInput
+
+		CharacterClass.SampleInput = function(self, p2)
+			local sample = original(self, p2)
+			if not sample then return sample end
+
+			if bhopEnabled and (spaceHeld or UserInputService:IsKeyDown(Enum.KeyCode.Space)) then
+				local mv = self.MovementState
+				if mv and mv.OnGround then
+					sample.Buttons = Buttons.with(sample.Buttons, Buttons.Jump, true)
+				else
+					sample.Buttons = Buttons.with(sample.Buttons, Buttons.Jump, false)
+				end
+			end
+
+			return sample
+		end
+	end
+end
+
+pcall(setupBhop)
+
+-- ESP Logic
+local Toggles = {
+	SkeletonESP = false,
+	BoxESP = false,
+	Chams = false
+}
+
+local COLOR_ESP = Color3.fromRGB(255, 60, 60)
+local COLOR_CHAMS = Color3.fromRGB(255, 140, 0)
+local COLOR_WHITE = Color3.fromRGB(255, 255, 255)
+
+local ESPObjects = {}
+local ChamsObjects = {}
+
+local function removeESP(player)
+	if ESPObjects[player] then
+		if ESPObjects[player].Lines then
+			for _, line in ipairs(ESPObjects[player].Lines) do
+				line.Visible = false
+				pcall(function() line:Remove() end)
+			end
+		end
+		if ESPObjects[player].Box then
+			for _, quadLine in pairs(ESPObjects[player].Box) do
+				quadLine.Visible = false
+				pcall(function() quadLine:Remove() end)
+			end
+		end
+		ESPObjects[player] = nil
+	end
+	if ChamsObjects[player] then
+		pcall(function() ChamsObjects[player]:Destroy() end)
+		ChamsObjects[player] = nil
+	end
+end
+
+local function clearAllESP()
+	for _, data in pairs(ESPObjects) do
+		if data.Lines then
+			for _, line in ipairs(data.Lines) do line.Visible = false end
+		end
+		if data.Box then
+			for _, side in pairs(data.Box) do side.Visible = false end
+		end
+	end
+	for _, highlight in pairs(ChamsObjects) do
+		pcall(function() highlight.Enabled = false end)
+	end
+end
+
+local function worldToScreen(worldPos)
+	local screenPos, onScreen = Camera:WorldToViewportPoint(worldPos)
+	return Vector2.new(screenPos.X, screenPos.Y), onScreen
+end
+
+local function getCharacterModel(player)
+	local charsFolder = Workspace:FindFirstChild("Characters")
+	if charsFolder then
+		local found = charsFolder:FindFirstChild(player.Name) or charsFolder:FindFirstChild(tostring(player.UserId))
+		if found then return found end
+	end
+	return player.Character
+end
+
+local function isLocalPlayerAlive()
+	local char = getCharacterModel(LocalPlayer)
+	if not char then return false end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health > 0 then return true end
+	return char:FindFirstChild("HumanoidRootPart") ~= nil or char:FindFirstChild("Head") ~= nil
+end
+
+local R15_JOINTS = {
+	{"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+	{"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+	{"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+	{"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+	{"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"}
+}
+
+local R6_JOINTS = {
+	{"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+	{"Torso", "Left Leg"}, {"Torso", "Right Leg"}
+}
+
+local function getHumanoidJoints(character)
+	local joints = {}
+	local isR15 = character:FindFirstChild("UpperTorso") ~= nil
+	local jointList = isR15 and R15_JOINTS or R6_JOINTS
+	for i = 1, #jointList do
+		local pair = jointList[i]
+		local partA = character:FindFirstChild(pair[1])
+		local partB = character:FindFirstChild(pair[2])
+		if partA and partB and partA:IsA("BasePart") and partB:IsA("BasePart") then
+			table.insert(joints, {partA, partB})
+		end
+	end
+	return joints
+end
+
+local function updateChams(player, char)
+	if not Toggles.Chams or player == LocalPlayer then
+		if ChamsObjects[player] then ChamsObjects[player].Enabled = false end
+		return
+	end
+	if not ChamsObjects[player] or ChamsObjects[player].Parent ~= char then
+		if ChamsObjects[player] then pcall(function() ChamsObjects[player]:Destroy() end) end
+		local highlight = Instance.new("Highlight")
+		highlight.Name = "ESP_Chams"
+		highlight.FillColor = COLOR_CHAMS
+		highlight.FillTransparency = 0.5
+		highlight.OutlineColor = COLOR_WHITE
+		highlight.OutlineTransparency = 0.2
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.Parent = char
+		ChamsObjects[player] = highlight
+	end
+	ChamsObjects[player].Enabled = true
+end
+
+task.spawn(function()
+	while true do
+		task.wait(5)
+		for player, highlight in pairs(ChamsObjects) do
+			if highlight then pcall(function() highlight:Destroy() end) end
+		end
+		table.clear(ChamsObjects)
+	end
+end)
+
+local function updateESP()
+	if not isLocalPlayerAlive() then
+		clearAllESP()
+		return
+	end
+
+	local drawingSupported = (type(Drawing) == "table" and type(Drawing.new) == "function")
+
+	for player, data in pairs(ESPObjects) do
+		local char = getCharacterModel(player)
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local isAlive = char and ((hum and hum.Health > 0) or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head"))
+
+		if isAlive and player ~= LocalPlayer then
+			updateChams(player, char)
+
+			if Toggles.SkeletonESP and drawingSupported then
+				local joints = getHumanoidJoints(char)
+				while #data.Lines < #joints do
+					local ok, line = pcall(Drawing.new, "Line")
+					if ok and line then
+						line.Visible = false
+						line.Thickness = 1.5
+						line.Transparency = 1
+						table.insert(data.Lines, line)
+					else
+						break
+					end
+				end
+				for i = 1, #joints do
+					local joint = joints[i]
+					local line = data.Lines[i]
+					if line then
+						local posA, visA = worldToScreen(joint[1].Position)
+						local posB, visB = worldToScreen(joint[2].Position)
+						if visA and visB then
+							line.From = posA
+							line.To = posB
+							line.Color = COLOR_ESP
+							line.Visible = true
+						else
+							line.Visible = false
+						end
+					end
+				end
+				for i = #joints + 1, #data.Lines do
+					if data.Lines[i] then data.Lines[i].Visible = false end
+				end
+			else
+				for i = 1, #data.Lines do
+					if data.Lines[i] then data.Lines[i].Visible = false end
+				end
+			end
+
+			if Toggles.BoxESP and drawingSupported and data.Box and data.Box.Top then
+				local cframe, size = char:GetBoundingBox()
+				local rootPos, vis = worldToScreen(cframe.Position)
+				if vis then
+					local topWorld = cframe.Position + Vector3.new(0, size.Y / 2, 0)
+					local bottomWorld = cframe.Position - Vector3.new(0, size.Y / 2, 0)
+					local topScreen, visTop = worldToScreen(topWorld)
+					local bottomScreen, visBottom = worldToScreen(bottomWorld)
+					if visTop and visBottom then
+						local height = math.abs(topScreen.Y - bottomScreen.Y)
+						local width = height * 0.65
+						local x = rootPos.X - (width / 2)
+						local y = topScreen.Y
+
+						data.Box.Top.From = Vector2.new(x, y)
+						data.Box.Top.To = Vector2.new(x + width, y)
+						data.Box.Top.Color = COLOR_ESP
+						data.Box.Top.Visible = true
+
+						data.Box.Bottom.From = Vector2.new(x, y + height)
+						data.Box.Bottom.To = Vector2.new(x + width, y + height)
+						data.Box.Bottom.Color = COLOR_ESP
+						data.Box.Bottom.Visible = true
+
+						data.Box.Left.From = Vector2.new(x, y)
+						data.Box.Left.To = Vector2.new(x, y + height)
+						data.Box.Left.Color = COLOR_ESP
+						data.Box.Left.Visible = true
+
+						data.Box.Right.From = Vector2.new(x + width, y)
+						data.Box.Right.To = Vector2.new(x + width, y + height)
+						data.Box.Right.Color = COLOR_ESP
+						data.Box.Right.Visible = true
+					else
+						for _, side in pairs(data.Box) do side.Visible = false end
+					end
+				else
+					for _, side in pairs(data.Box) do side.Visible = false end
+				end
+			else
+				if data.Box then
+					for _, side in pairs(data.Box) do side.Visible = false end
+				end
+			end
+		else
+			for i = 1, #data.Lines do
+				if data.Lines[i] then data.Lines[i].Visible = false end
+			end
+			if data.Box then
+				for _, side in pairs(data.Box) do side.Visible = false end
+			end
+			if ChamsObjects[player] then ChamsObjects[player].Enabled = false end
+		end
+	end
+end
+
+local function createESP(player)
+	if ESPObjects[player] then removeESP(player) end
+	local boxLines = nil
+	if type(Drawing) == "table" and type(Drawing.new) == "function" then
+		pcall(function()
+			boxLines = {
+				Top = Drawing.new("Line"),
+				Bottom = Drawing.new("Line"),
+				Left = Drawing.new("Line"),
+				Right = Drawing.new("Line")
+			}
+			for _, line in pairs(boxLines) do
+				line.Thickness = 1.5
+				line.Transparency = 1
+				line.Visible = false
+			end
+		end)
+	end
+	ESPObjects[player] = { Lines = {}, Box = boxLines or {}, Player = player }
+end
+
+for _, p in ipairs(Players:GetPlayers()) do createESP(p) end
+Players.PlayerAdded:Connect(createESP)
+Players.PlayerRemoving:Connect(removeESP)
+LocalPlayer.CharacterAdded:Connect(function() clearAllESP() end)
+RunService.RenderStepped:Connect(updateESP)
+
+-- Skin Changer Logic
 local assetsFolder = ReplicatedStorage:FindFirstChild("Assets")
 local skinsFolder = assetsFolder and assetsFolder:FindFirstChild("Skins")
 
@@ -478,6 +811,7 @@ LocalPlayer.CharacterAdded:Connect(function()
 	refreshAllViewmodelsOnSpawn()
 end)
 
+-- Config System
 local CONFIG_FOLDER = "SkinChanger"
 local CFG_XOR_KEY = 0x57
 
@@ -526,6 +860,8 @@ local function saveConfig(name)
 		Weapons = selectedWeaponSkins,
 		Knife = currentKnife,
 		Gloves = currentGloves,
+		Bhop = bhopEnabled,
+		ESP = Toggles,
 		_rnd = math.random(100000, 999999)
 	}
 
@@ -579,6 +915,19 @@ local function loadConfig(name)
 	end
 	if type(data.Gloves) == "table" and data.Gloves.model then
 		queueGloves(data.Gloves.model, data.Gloves.skin or "")
+	end
+	if type(data.Bhop) == "boolean" then
+		bhopEnabled = data.Bhop
+	end
+	if type(data.ESP) == "table" then
+		for k, v in pairs(data.ESP) do
+			if Toggles[k] ~= nil and type(v) == "boolean" then
+				Toggles[k] = v
+			end
+		end
+		if not Toggles.SkeletonESP and not Toggles.BoxESP and not Toggles.Chams then
+			clearAllESP()
+		end
 	end
 
 	return true
@@ -737,6 +1086,7 @@ pcall(function()
 	end
 end)
 
+-- GUI Setup
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "BloxStrikeSkinChangerGui"
 screenGui.ResetOnSpawn = false
@@ -772,8 +1122,8 @@ cursorCorner.Parent = customCursor
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 420, 0, 518)
-mainFrame.Position = UDim2.new(0.5, -210, 0.5, -259)
+mainFrame.Size = UDim2.new(0, 480, 0, 518)
+mainFrame.Position = UDim2.new(0.5, -240, 0.5, -259)
 mainFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 mainFrame.BackgroundTransparency = 0
 mainFrame.BorderSizePixel = 1
@@ -829,7 +1179,7 @@ topBar.BorderSizePixel = 0
 topBar.Parent = mainFrame
 
 local titleLabel = Instance.new("TextLabel")
-titleLabel.Text = "Blox Strike Changer"
+titleLabel.Text = "Blox Strike Menu"
 titleLabel.Size = UDim2.new(1, -50, 1, 0)
 titleLabel.Position = UDim2.new(0, 14, 0, 0)
 titleLabel.Font = Enum.Font.Code
@@ -861,7 +1211,7 @@ tabsBar.Parent = mainFrame
 local tabsLayout = Instance.new("UIListLayout")
 tabsLayout.FillDirection = Enum.FillDirection.Horizontal
 tabsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-tabsLayout.Padding = UDim.new(0, 6)
+tabsLayout.Padding = UDim.new(0, 4)
 tabsLayout.Parent = tabsBar
 
 local navBar = Instance.new("Frame")
@@ -919,7 +1269,7 @@ scrollPadding.Parent = scroll
 
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Name = "ToggleChanger"
-toggleBtn.Text = "SKINS"
+toggleBtn.Text = "MENU"
 toggleBtn.Size = UDim2.new(0, 80, 0, 35)
 toggleBtn.Position = UDim2.new(0, 20, 0.5, -20)
 toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -955,7 +1305,7 @@ local renderContent
 local function notify(text)
 	pcall(function()
 		StarterGui:SetCore("SendNotification", {
-			Title = "Skin Changer",
+			Title = "Blox Strike Menu",
 			Text = text,
 			Duration = 2.5
 		})
@@ -972,6 +1322,104 @@ end
 
 renderContent = function()
 	clearScroll()
+
+	if currentCategory == "Bhop" then
+		backBtn.Visible = false
+		navTitle.Position = UDim2.new(0, 3, 0, 0)
+		navTitle.Text = "Bhop"
+
+		local bhopBtn = Instance.new("TextButton")
+		bhopBtn.Name = "BhopToggle"
+		bhopBtn.Size = UDim2.new(1, 0, 0, 38)
+		bhopBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		bhopBtn.BorderSizePixel = 1
+		bhopBtn.BorderColor3 = Color3.fromRGB(255, 140, 0)
+		bhopBtn.Font = Enum.Font.Code
+		bhopBtn.TextSize = 13
+		bhopBtn.TextXAlignment = Enum.TextXAlignment.Left
+
+		if bhopEnabled then
+			bhopBtn.TextColor3 = Color3.fromRGB(0, 255, 0)
+			bhopBtn.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+			bhopBtn.TextStrokeTransparency = 0
+			bhopBtn.Text = "   [*] Auto Bhop (Enabled)"
+		else
+			bhopBtn.TextColor3 = Color3.fromRGB(230, 230, 240)
+			bhopBtn.TextStrokeTransparency = 1
+			bhopBtn.Text = "   [ ] Auto Bhop (Disabled)"
+		end
+
+		bhopBtn.Parent = scroll
+
+		bhopBtn.MouseButton1Click:Connect(function()
+			bhopEnabled = not bhopEnabled
+			notify("Bhop: " .. (bhopEnabled and "Enabled" or "Disabled"))
+			renderContent()
+		end)
+
+		local infoLabel = Instance.new("TextLabel")
+		infoLabel.Name = "BhopInfo"
+		infoLabel.Size = UDim2.new(1, 0, 0, 30)
+		infoLabel.BackgroundTransparency = 1
+		infoLabel.BorderSizePixel = 0
+		infoLabel.Text = "Hold Spacebar while moving to bunny hop."
+		infoLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+		infoLabel.Font = Enum.Font.Code
+		infoLabel.TextSize = 12
+		infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+		infoLabel.Parent = scroll
+
+		return
+	end
+
+	if currentCategory == "ESP" then
+		backBtn.Visible = false
+		navTitle.Position = UDim2.new(0, 3, 0, 0)
+		navTitle.Text = "ESP / Visuals"
+
+		local espOptions = {
+			{ Key = "SkeletonESP", Name = "Skeleton ESP" },
+			{ Key = "BoxESP", Name = "Box ESP (2D)" },
+			{ Key = "Chams", Name = "Chams (Highlight)" }
+		}
+
+		for _, opt in ipairs(espOptions) do
+			local btn = Instance.new("TextButton")
+			btn.Name = opt.Key
+			btn.Size = UDim2.new(1, 0, 0, 38)
+			btn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+			btn.BorderSizePixel = 1
+			btn.BorderColor3 = Color3.fromRGB(255, 140, 0)
+			btn.Font = Enum.Font.Code
+			btn.TextSize = 13
+			btn.TextXAlignment = Enum.TextXAlignment.Left
+
+			local isEnabled = Toggles[opt.Key]
+			if isEnabled then
+				btn.TextColor3 = Color3.fromRGB(0, 255, 0)
+				btn.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+				btn.TextStrokeTransparency = 0
+				btn.Text = string.format("   [*] %s (ON)", opt.Name)
+			else
+				btn.TextColor3 = Color3.fromRGB(230, 230, 240)
+				btn.TextStrokeTransparency = 1
+				btn.Text = string.format("   [ ] %s (OFF)", opt.Name)
+			end
+
+			btn.Parent = scroll
+
+			btn.MouseButton1Click:Connect(function()
+				Toggles[opt.Key] = not Toggles[opt.Key]
+				if not Toggles[opt.Key] then
+					clearAllESP()
+				end
+				notify(opt.Name .. ": " .. (Toggles[opt.Key] and "Enabled" or "Disabled"))
+				renderContent()
+			end)
+		end
+
+		return
+	end
 
 	if currentCategory == "Configs" then
 		backBtn.Visible = false
@@ -1215,12 +1663,12 @@ backBtn.MouseButton1Click:Connect(function()
 	renderContent()
 end)
 
-local categoriesList = {"Weapons", "Knives", "Gloves", "Configs"}
+local categoriesList = {"Weapons", "Knives", "Gloves", "Configs", "Bhop", "ESP"}
 for _, cat in ipairs(categoriesList) do
 	local tabBtn = Instance.new("TextButton")
 	tabBtn.Name = cat
 	tabBtn.Text = cat
-	tabBtn.Size = UDim2.new(0, 92, 1, 0)
+	tabBtn.Size = UDim2.new(0, 71, 1, 0)
 	tabBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 	tabBtn.BorderSizePixel = 0
 	tabBtn.Font = Enum.Font.Code
@@ -1252,7 +1700,7 @@ tabButtons["Weapons"].TextColor3 = Color3.fromRGB(0, 255, 0)
 tabButtons["Weapons"].TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 tabButtons["Weapons"].TextStrokeTransparency = 0
 
-for _, cat in ipairs({"Knives", "Gloves", "Configs"}) do
+for _, cat in ipairs({"Knives", "Gloves", "Configs", "Bhop", "ESP"}) do
 	tabButtons[cat].TextColor3 = Color3.fromRGB(150, 150, 150)
 	tabButtons[cat].TextStrokeTransparency = 1
 end
